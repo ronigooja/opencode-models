@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { applyCatalog } from "../src/models"
 import type { ProviderEditor } from "@opencode/plugin/promise/provider"
 import type { Model } from "@opencode/plugin"
-import { configDirectory, readConfig } from "../src/server"
+import { configDirectory, readConfig, selectProvider } from "../src/server"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -39,6 +39,13 @@ try {
   assert.deepEqual(await readConfig(configDirectory()), { providers: { gateway: { settings: { baseURL: "https://example.test" } } } })
   await writeFile(path.join(dir, "opencode.json"), '{ /* comment */ "model": "gateway/test", }')
   assert.deepEqual(await readConfig(dir), { model: "gateway/test" })
+  const gateway = { name: "Gateway", settings: { baseURL: "http://localhost", apiKey: "mock-only" } }
+  await writeFile(path.join(dir, "opencode.json"), JSON.stringify({ providers: { gateway } }))
+  assert.deepEqual(selectProvider(await readConfig(dir), undefined), { id: "gateway", name: "Gateway", baseURL: "http://localhost", apiKey: "mock-only" })
+  assert.match(selectProvider({ providers: { gateway, other: gateway } }, undefined).reason ?? "", /found 2/)
+  assert.equal(selectProvider({ providers: { gateway, other: gateway } }, "other").id, "other")
+  assert.match(selectProvider({ providers: { gateway: { settings: { baseURL: "http://localhost" } } } }, "gateway").reason ?? "", /Missing/)
+  assert.match(selectProvider({ providers: { gateway: { settings: { baseURL: "http://localhost" } } } }, undefined).reason ?? "", /found 0/)
   await writeFile(path.join(dir, "opencode.json"), '{ invalid }')
   await assert.rejects(readConfig(dir))
   delete process.env.OPENCODE_CONFIG_DIR

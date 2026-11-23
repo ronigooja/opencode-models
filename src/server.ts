@@ -28,6 +28,21 @@ export async function readConfig(configDir: string) {
 export function configDirectory() {
   return process.env.OPENCODE_CONFIG_DIR || path.join(homedir(), ".config", "opencode")
 }
+export function selectProvider(config: Record<string, unknown>, selected: unknown) {
+  const providers = object(config.providers)
+  const candidates = Object.entries(providers).filter(([, provider]) => {
+    const settings = object(object(provider).settings)
+    return text(settings.baseURL) && text(settings.apiKey)
+  })
+  const id = text(selected) || (candidates.length === 1 ? candidates[0][0] : undefined)
+  if (!id) return { reason: `Expected one configured gateway provider, found ${candidates.length}` }
+  const provider = object(providers[id])
+  const settings = object(provider.settings)
+  const baseURL = process.env.OPENCODE_BASE_URL || text(settings.baseURL)
+  const apiKey = process.env.OPENCODE_API_KEY || text(settings.apiKey)
+  if (!baseURL || !apiKey) return { reason: `Missing gateway configuration for provider ${id}` }
+  return { id, name: text(provider.name) || id, baseURL, apiKey }
+}
 const request = async (url: string, key?: string, timeout = 30000): Promise<unknown> => {
   const response = await fetch(url, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(timeout) })
   if (!response.ok) throw new Error(`Catalog HTTP ${response.status}`)
@@ -38,7 +53,6 @@ export default Plugin.define({
   id: "ronigooja.models",
   async setup(ctx) {
     const configDir = configDirectory()
-    const prefsPath = process.env.OPENCODE_MODEL_ROUTING || path.join(configDir, "model-routing.json")
     const interval = typeof ctx.options.interval === "number" && Number.isFinite(ctx.options.interval) && ctx.options.interval >= 1 && ctx.options.interval <= 2147483 ? ctx.options.interval : 86400
     let snapshot: Parameters<typeof applyCatalog>[1] | undefined
     let running = false
@@ -47,14 +61,13 @@ export default Plugin.define({
       if (running || stopped) return
       running = true
       try {
-        const prefs = await json(prefsPath).catch((): Record<string, unknown> => ({}))
-        const id = text(ctx.options.provider) || process.env.OPENCODE_PROVIDER_ID || text(prefs.provider) || "cliproxyapi"
-        const name = text(ctx.options.providerName) || process.env.OPENCODE_PROVIDER_NAME || text(prefs.providerName) || "zoeapi"
         const config = await readConfig(configDir)
-        const settings = object(object(object(config.providers)[id]).settings)
-        const baseURL = process.env.OPENCODE_BASE_URL || text(settings.baseURL)
-        const apiKey = process.env.OPENCODE_API_KEY || text(settings.apiKey)
-        if (!baseURL || !apiKey) throw new Error("Missing gateway configuration")
+        const selectedProvider = selectProvider(config, ctx.options.provider)
+        if ("reason" in selectedProvider) {
+          console.warn(`[models] ${selectedProvider.reason}; synchronization skipped`)
+          return
+        }
+        const { id, name, baseURL, apiKey } = selectedProvider
         const gateway = await request(process.env.OPENCODE_MODEL_CATALOG_URL || `${baseURL.replace(/\/$/, "")}/models`, apiKey)
         const official = await request(process.env.OPENCODE_OFFICIAL_CATALOG_URL || "https://models.opencode.ai/catalog.json", undefined, 60000).catch(() => ({}))
         const entries = object(gateway).data ?? object(gateway).models
