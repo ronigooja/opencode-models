@@ -28,7 +28,7 @@ export function applyCatalog(editor: ProviderEditor, input: { id: string; name: 
   const officialProviders = object(object(input.official).providers)
   const limits = new Map<string, RecordValue>()
   for (const provider of ["anthropic", "openai"]) {
-    for (const [id, model] of Object.entries(object(object(officialProviders[provider]).models))) limits.set(id, object(object(model).limit))
+    for (const [id, model] of Object.entries(object(object(officialProviders[provider]).models))) limits.set(id, object(model))
   }
   const gateway = object(input.gateway)
   const entries = gateway.data ?? gateway.models
@@ -40,7 +40,10 @@ export function applyCatalog(editor: ProviderEditor, input: { id: string; name: 
     seen.add(item.id)
     const id = Model.ID.make(item.id)
     const base = existing?.models.get(id) ?? Model.Info.default(providerID, id)
-    const fallback = limits.get(id) ?? {}
+    const official = limits.get(id) ?? {}
+    const fallback = object(official.limit)
+    const options = Array.isArray(official.reasoning_options) ? official.reasoning_options : []
+    const effort = options.map(object).find((option) => option.type === "effort" && Array.isArray(option.values) && option.values.length && option.values.every((value: unknown) => typeof value === "string" && value.length))
     const context = positive(item.context_length, item.context_window, item.max_context_length, item.context, fallback.context)
     const inputLimit = positive(
       item.input_length, item.max_input_length, item.max_prompt_tokens,
@@ -51,6 +54,7 @@ export function applyCatalog(editor: ProviderEditor, input: { id: string; name: 
     const released = Number.isFinite(new Date(timestamp).getTime()) ? Math.floor(timestamp / 86400000) * 86400000 : undefined
     return [{
       ...base,
+      variants: effort ? (effort.values as string[]).map((value) => ({ id: Model.VariantID.make(value), settings: { reasoningEffort: value } })) : base.variants,
       name: name(item.id),
       time: released === undefined ? base.time : { ...base.time, released },
       limit: {

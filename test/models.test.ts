@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { applyCatalog } from "../src/models"
 import type { ProviderEditor } from "@opencode/plugin/promise/provider"
-import type { Model } from "@opencode/plugin"
+import { Model, Provider } from "@opencode/plugin"
 import plugin, { configDirectory, readCache, readConfig, selectProvider } from "../src/server"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
@@ -27,6 +27,24 @@ applyCatalog(editor, {
   official: {}, defaultModel: "missing",
 })
 assert.deepEqual(saved.map((model) => model.name), ["Claude Sonnet 3 (2024-10-22)", "missing"])
+const existing = { ...Model.Info.default(Provider.ID.make("gateway"), Model.ID.make("gpt-existing")), variants: [{ id: Model.VariantID.make("custom"), settings: { custom: true } }] }
+const updateEditor = {
+  get: () => ({ models: new Map([[existing.id, existing]]) }),
+  update: (_id: string, callback: (provider: object) => void) => callback({ settings: {} }),
+  models: { set: (_id: string, models: readonly Model.Info[]) => { saved = models } },
+} as unknown as ProviderEditor
+applyCatalog(updateEditor, {
+  id: "gateway", name: "Gateway", baseURL: "https://example.test", apiKey: "test",
+  gateway: { data: ["gpt-effort", "gpt-null", "gpt-missing", "gpt-malformed", "gpt-existing"].map((id) => ({ id })) },
+  official: { providers: { openai: { models: {
+    "gpt-effort": { reasoning_options: [{ type: "effort", values: ["low", "high"] }] },
+    "gpt-null": { reasoning_options: null },
+    "gpt-malformed": { reasoning_options: [{ type: "effort", values: [42] }] },
+  } } } },
+})
+assert.deepEqual(saved[0].variants, ["low", "high"].map((value) => ({ id: value, settings: { reasoningEffort: value } })))
+for (const model of saved.slice(1, 4)) assert.deepEqual(model.variants, [])
+assert.deepEqual(saved[4].variants, existing.variants)
 const dir = await mkdtemp(path.join(process.cwd(), "test-config-"))
 const previousDir = process.env.OPENCODE_CONFIG_DIR
 const previousXdg = process.env.XDG_CONFIG_HOME
