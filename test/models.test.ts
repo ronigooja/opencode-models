@@ -2,7 +2,8 @@ import assert from "node:assert/strict"
 import { applyCatalog } from "../src/models"
 import type { ProviderEditor } from "@opencode/plugin/promise/provider"
 import type { Model } from "@opencode/plugin"
-import { configDirectory, readConfig, selectProvider } from "../src/server"
+import plugin, { configDirectory, readCache, readConfig, selectProvider } from "../src/server"
+import type { Context } from "@opencode/plugin/promise/plugin"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -60,3 +61,56 @@ try {
   await rm(dir, { recursive: true, force: true })
 }
 console.log("catalog conversion passed")
+
+const catalog = { gateway: { data: [{ id: "gpt-test" }] }, official: { providers: { openai: {} } }, savedAt: 1 }
+assert.deepEqual(readCache(JSON.parse(JSON.stringify(catalog))), catalog)
+for (const invalid of [undefined, {}, { ...catalog, gateway: {} }, { ...catalog, gateway: { data: [{ id: "gpt-image-1" }] } }, { ...catalog, official: [] }, { ...catalog, savedAt: "1" }]) assert.equal(readCache(invalid), undefined)
+
+const cacheDir = await mkdtemp(path.join(process.cwd(), "test-cache-"))
+const oldDir = process.env.OPENCODE_CONFIG_DIR
+const oldFetch = globalThis.fetch
+try {
+  process.env.OPENCODE_CONFIG_DIR = cacheDir
+  await writeFile(path.join(cacheDir, "opencode.json"), JSON.stringify({ providers: { gateway: { settings: { baseURL: "http://localhost", apiKey: "mock-only" } } } }))
+  let stored: unknown = catalog
+  let transformed = false
+  let reloaded: (() => void) | undefined
+  let refreshDone = new Promise<void>((resolve) => { reloaded = resolve })
+  let officialFails = true
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    if (String(url).startsWith("http://localhost/")) return new Response(JSON.stringify({ data: [{ id: "gpt-new" }] }))
+    if (officialFails) throw new Error("offline")
+    return new Response(JSON.stringify({ providers: {} }))
+  }) as typeof fetch
+  const ctx = {
+    options: {},
+    storage: { get: async () => stored, set: async (_key: string, value: unknown) => { stored = value; reloaded?.() } },
+    provider: {
+      transform: async (callback: (editor: ProviderEditor) => void) => { saved = []; callback(editor); transformed = saved.some((model) => model.id === "gpt-test") },
+      reload: async () => {},
+    },
+  } as unknown as Context
+  const cleanup = await plugin.setup(ctx)
+  assert.equal(transformed, true)
+  await refreshDone
+  assert.deepEqual((stored as typeof catalog).official, catalog.official)
+  assert.equal((stored as typeof catalog).gateway.data[0].id, "gpt-new")
+  assert.deepEqual(Object.keys(stored as object).sort(), ["gateway", "official", "savedAt"])
+  if (cleanup) await cleanup()
+  for (const invalid of [undefined, { gateway: {} }]) {
+    stored = invalid
+    transformed = true
+    officialFails = false
+    refreshDone = new Promise<void>((resolve) => { reloaded = resolve })
+    const stop = await plugin.setup(ctx)
+    assert.equal(transformed, false)
+    await refreshDone
+    if (stop) await stop()
+  }
+} finally {
+  globalThis.fetch = oldFetch
+  if (oldDir === undefined) delete process.env.OPENCODE_CONFIG_DIR
+  else process.env.OPENCODE_CONFIG_DIR = oldDir
+  await rm(cacheDir, { recursive: true, force: true })
+}
+console.log("catalog cache passed")

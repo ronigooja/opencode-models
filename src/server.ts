@@ -48,6 +48,22 @@ const request = async (url: string, key?: string, timeout = 30000): Promise<unkn
   if (!response.ok) throw new Error(`Catalog HTTP ${response.status}`)
   return response.json() as Promise<unknown>
 }
+const validGateway = (gateway: unknown) => {
+  const entries = object(gateway).data ?? object(gateway).models
+  return Array.isArray(entries) && entries.some((entry) => {
+    const id = object(entry).id
+    return typeof id === "string" && id.length > 0 && !/^(gpt-image|codex-auto-review)/.test(id)
+  })
+}
+export function readCache(value: unknown) {
+  const cache = object(value)
+  if (!validGateway(cache.gateway) || !cache.official || typeof cache.official !== "object" || Array.isArray(cache.official) || typeof cache.savedAt !== "number" || !Number.isFinite(cache.savedAt)) return undefined
+  return { gateway: cache.gateway, official: cache.official, savedAt: cache.savedAt }
+}
+const defaultModel = (config: Record<string, unknown>, id: string) => {
+  const selected = text(config.model)
+  return process.env.OPENCODE_DEFAULT_MODEL || (selected?.startsWith(`${id}/`) ? selected.slice(id.length + 1) : undefined)
+}
 
 export default Plugin.define({
   id: "ronigooja.models",
@@ -57,6 +73,15 @@ export default Plugin.define({
     let snapshot: Parameters<typeof applyCatalog>[1] | undefined
     let running = false
     let stopped = false
+    try {
+      const cache = readCache(await ctx.storage.get("catalog"))
+      if (cache) {
+        const config = await readConfig(configDir)
+        const provider = selectProvider(config, ctx.options.provider)
+        if (!("reason" in provider)) snapshot = { ...provider, ...cache, defaultModel: defaultModel(config, provider.id) }
+      }
+    } catch {
+    }
     const refresh = async () => {
       if (running || stopped) return
       running = true
@@ -69,23 +94,18 @@ export default Plugin.define({
         }
         const { id, name, baseURL, apiKey } = selectedProvider
         const gateway = await request(process.env.OPENCODE_MODEL_CATALOG_URL || `${baseURL.replace(/\/$/, "")}/models`, apiKey)
-        const official = await request(process.env.OPENCODE_OFFICIAL_CATALOG_URL || "https://models.opencode.ai/catalog.json", undefined, 60000).catch(() => ({}))
-        const entries = object(gateway).data ?? object(gateway).models
-        if (!Array.isArray(entries) || !entries.some((entry) => {
-          const id = object(entry).id
-          return typeof id === "string" && id.length > 0 && !/^(gpt-image|codex-auto-review)/.test(id)
-        })) throw new Error("Invalid gateway catalog")
+        if (!validGateway(gateway)) throw new Error("Invalid gateway catalog")
+        const official = await request(process.env.OPENCODE_OFFICIAL_CATALOG_URL || "https://models.opencode.ai/catalog.json", undefined, 60000).catch(() => snapshot?.official ?? {})
         if (stopped) return
-        const selected = text(config.model)
-        const defaultModel = process.env.OPENCODE_DEFAULT_MODEL || (selected?.startsWith(`${id}/`) ? selected.slice(id.length + 1) : undefined)
         const previous = snapshot
-        snapshot = { id, name, baseURL, apiKey, gateway, official, defaultModel }
+        snapshot = { id, name, baseURL, apiKey, gateway, official, defaultModel: defaultModel(config, id) }
         try {
           await ctx.provider.reload()
         } catch (error) {
           snapshot = previous
           throw error
         }
+        await ctx.storage.set("catalog", { gateway, official, savedAt: Date.now() } as Parameters<typeof ctx.storage.set>[1]).catch(() => {})
       } catch {
       } finally {
         running = false
